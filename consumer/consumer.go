@@ -14,6 +14,9 @@ import (
 	"encoding/json"
 	"time"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 )
 
 const (
@@ -65,7 +68,14 @@ type DeliveryInfo struct{
 func ConnectionCloseHandler(closeErr chan *amqp.Error, c *Consumer) {
 	err := <- closeErr
 	c.ErrLogger.Fatalf("Connection closed: %v", err)
-	os.Exit(10)
+}
+
+func SigTermHandler(mutex *sync.Mutex, signals chan os.Signal, logger *log.Logger) {
+	<- signals
+	logger.Println("Received termination signal. Waiting for last message...")
+	mutex.Lock()
+	logger.Fatal("Shutdown caused by termination signal.")
+
 }
 
 func (c *Consumer) Consume() {
@@ -85,10 +95,17 @@ func (c *Consumer) Consume() {
 
 	go ConnectionCloseHandler(closeErr, c)
 
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM)
+	terminationMutex := new(sync.Mutex)
+
+	go SigTermHandler(terminationMutex, sigs, c.ErrLogger)
+
 	forever := make(chan bool)
 
 	go func() {
 		for d := range msgs {
+			terminationMutex.Lock()
 			input := d.Body
 
 			if c.IncludeMetadata {
@@ -155,6 +172,8 @@ func (c *Consumer) Consume() {
 				c.ErrLogger.Fatalf("Message acknowledgement error: %v", err)
 				os.Exit(11)
 			}
+
+			terminationMutex.Unlock()
 		}
 	}()
 
